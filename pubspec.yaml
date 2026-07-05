@@ -1,0 +1,16 @@
+name: ilac_dolabi
+description: Ev ilaç envanteri - karekod okuyucu
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  mobile_scanner: ^5.2.3      # karekod / DataMatrix okuma
+  shared_preferences: ^2.3.2  # ilaçları telefonda kalıcı saklama
+
+flutter:
+  uses-material-design: true
