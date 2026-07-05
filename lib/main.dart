@@ -22,6 +22,7 @@ class IlacDolabiApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'İlaç Dolabı',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorSchemeSeed: Colors.teal,
         useMaterial3: true,
