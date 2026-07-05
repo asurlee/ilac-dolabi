@@ -1,0 +1,58 @@
+name: APK Derle
+
+# Ne zaman çalışır:
+#  - main dalına her dosya yüklendiğinde
+#  - ya da Actions sekmesinden elle ("Run workflow")
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Depoyu çek
+        uses: actions/checkout@v4
+
+      - name: Java kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Flutter kur
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Kendi dosyalarımı yedekle
+        run: |
+          cp lib/main.dart /tmp/main.dart
+          cp pubspec.yaml /tmp/pubspec.yaml
+
+      - name: Android platform klasörlerini oluştur
+        run: flutter create --platforms=android --project-name ilac_dolabi .
+
+      - name: Kendi dosyalarımı geri koy
+        run: |
+          cp /tmp/main.dart lib/main.dart
+          cp /tmp/pubspec.yaml pubspec.yaml
+
+      - name: Kamera iznini ekle
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q "android.permission.CAMERA" "$M" || \
+          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA"/>\n    <application#' "$M"
+
+      - name: Paketleri indir
+        run: flutter pub get
+
+      - name: APK derle
+        run: flutter build apk --release
+
+      - name: APK'yı çıktı olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ilac-dolabi-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
