@@ -12,6 +12,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const IlacDolabiApp());
@@ -196,11 +197,40 @@ class _AnaSayfaState extends State<AnaSayfa> {
   }
 
   Future<void> _tara() async {
-    final ham = await Navigator.push<String>(
-      context,
-      MaterialPageRoute(builder: (_) => const TarayiciSayfa()),
+    // Telefonun kendi kamerasıyla karekodun fotoğrafını çek.
+    // (Canlı önizleme bazı cihazlarda çöküyor; bu yol onu atlar.)
+    final ImagePicker picker = ImagePicker();
+    final XFile? foto = await picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 100,
     );
-    if (ham == null) return;
+    if (foto == null) return; // kullanıcı vazgeçti
+
+    // Çekilen fotoğraftaki karekodu çöz (kamera önizlemesi gerekmez)
+    final MobileScannerController okuyucu = MobileScannerController(
+      formats: const [BarcodeFormat.dataMatrix, BarcodeFormat.qrCode],
+    );
+    BarcodeCapture? sonuc;
+    try {
+      sonuc = await okuyucu.analyzeImage(foto.path);
+    } catch (e) {
+      _mesaj('Karekod okunamadı: $e');
+    } finally {
+      await okuyucu.dispose();
+    }
+
+    if (sonuc == null || sonuc.barcodes.isEmpty) {
+      _mesaj('Fotoğrafta karekod bulunamadı. '
+          'Daha yakın, net ve iyi ışıkta çekmeyi deneyin.');
+      return;
+    }
+
+    final ham = sonuc.barcodes.first.rawValue;
+    if (ham == null) {
+      _mesaj('Karekod okunamadı, tekrar deneyin.');
+      return;
+    }
+
     final ilac = karekoduParcala(ham);
     if (ilac == null) {
       _mesaj('Bu karekod bir ilaç karekodu gibi görünmüyor.');
@@ -227,7 +257,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
       appBar: AppBar(title: const Text('İlaç Dolabım')),
       body: _ilaclar.isEmpty
           ? const Center(
-              child: Text('Henüz ilaç yok.\nAlttaki butonla karekod okut.',
+              child: Text('Henüz ilaç yok.\nAlttaki butonla karekod fotoğrafı çek.',
                   textAlign: TextAlign.center))
           : ListView.builder(
               itemCount: _ilaclar.length,
@@ -256,81 +286,9 @@ class _AnaSayfaState extends State<AnaSayfa> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _tara,
         icon: const Icon(Icons.qr_code_scanner),
-        label: const Text('Karekod Oku'),
+        label: const Text('Karekod Çek'),
       ),
     );
   }
 }
 
-// ---------------------------------------------------------------------------
-// Kamera tarayıcı ekranı
-// ---------------------------------------------------------------------------
-class TarayiciSayfa extends StatefulWidget {
-  const TarayiciSayfa({super.key});
-  @override
-  State<TarayiciSayfa> createState() => _TarayiciSayfaState();
-}
-
-class _TarayiciSayfaState extends State<TarayiciSayfa> {
-  // Kamera nesnesi burada (sabit) oluşturulur, build içinde DEĞİL.
-  // autoStart: false -> başlatmayı biz elle yapıyoruz (daha güvenilir).
-  final MobileScannerController _controller = MobileScannerController(
-    autoStart: false,
-    formats: const [BarcodeFormat.dataMatrix, BarcodeFormat.qrCode],
-  );
-  bool _okundu = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _basla();
-  }
-
-  Future<void> _basla() async {
-    try {
-      await _controller.start();
-    } catch (_) {
-      // Hata olursa aşağıdaki errorBuilder ekranda gösterecek.
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Karekodu kameraya gösterin')),
-      body: MobileScanner(
-        controller: _controller,
-        // Kamera açılamazsa gerçek hatayı ekranda göster
-        errorBuilder: (context, error, child) {
-          return Container(
-            color: Colors.black,
-            alignment: Alignment.center,
-            padding: const EdgeInsets.all(24),
-            child: Text(
-              'Kamera açılamadı.\n\n'
-              'Hata: ${error.errorCode}\n'
-              '${error.errorDetails?.message ?? ''}',
-              style: const TextStyle(color: Colors.white, fontSize: 16),
-              textAlign: TextAlign.center,
-            ),
-          );
-        },
-        onDetect: (capture) {
-          if (_okundu) return;
-          if (capture.barcodes.isEmpty) return;
-          final ham = capture.barcodes.first.rawValue;
-          if (ham != null) {
-            _okundu = true;
-            Navigator.pop(context, ham);
-          }
-        },
-      ),
-    );
-  }
-}
