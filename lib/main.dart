@@ -271,19 +271,58 @@ class TarayiciSayfa extends StatefulWidget {
 }
 
 class _TarayiciSayfaState extends State<TarayiciSayfa> {
+  // Kamera nesnesi burada (sabit) oluşturulur, build içinde DEĞİL.
+  // autoStart: false -> başlatmayı biz elle yapıyoruz (daha güvenilir).
+  final MobileScannerController _controller = MobileScannerController(
+    autoStart: false,
+    formats: const [BarcodeFormat.dataMatrix, BarcodeFormat.qrCode],
+  );
   bool _okundu = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _basla();
+  }
+
+  Future<void> _basla() async {
+    try {
+      await _controller.start();
+    } catch (_) {
+      // Hata olursa aşağıdaki errorBuilder ekranda gösterecek.
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Karekodu kameraya gösterin')),
       body: MobileScanner(
-        // DataMatrix formatını da okusun
-        controller: MobileScannerController(
-          formats: const [BarcodeFormat.dataMatrix, BarcodeFormat.qrCode],
-        ),
+        controller: _controller,
+        // Kamera açılamazsa gerçek hatayı ekranda göster
+        errorBuilder: (context, error, child) {
+          return Container(
+            color: Colors.black,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              'Kamera açılamadı.\n\n'
+              'Hata: ${error.errorCode}\n'
+              '${error.errorDetails?.message ?? ''}',
+              style: const TextStyle(color: Colors.white, fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
+          );
+        },
         onDetect: (capture) {
           if (_okundu) return;
+          if (capture.barcodes.isEmpty) return;
           final ham = capture.barcodes.first.rawValue;
           if (ham != null) {
             _okundu = true;
