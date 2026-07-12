@@ -45,6 +45,15 @@ jobs:
           grep -q "android.permission.CAMERA" "$M" || \
           sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA"/>\n    <application#' "$M"
 
+      - name: minSdk 23 yap (mobile_scanner 7.x bunu gerektiriyor)
+        run: |
+          for f in android/app/build.gradle android/app/build.gradle.kts; do
+            if [ -f "$f" ]; then
+              sed -i 's/flutter.minSdkVersion/23/g' "$f"
+              echo "minSdk ayarlandı: $f"
+            fi
+          done
+
       - name: Paketleri indir
         run: flutter pub get
 
