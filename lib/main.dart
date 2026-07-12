@@ -197,40 +197,12 @@ class _AnaSayfaState extends State<AnaSayfa> {
   }
 
   Future<void> _tara() async {
-    // Telefonun kendi kamerasıyla karekodun fotoğrafını çek.
-    // (Canlı önizleme bazı cihazlarda çöküyor; bu yol onu atlar.)
-    final ImagePicker picker = ImagePicker();
-    final XFile? foto = await picker.pickImage(
-      source: ImageSource.camera,
-      imageQuality: 100,
+    // Canlı tarayıcı ekranını aç; okunan karekodu (ham metin) geri alır.
+    final ham = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const TarayiciSayfa()),
     );
-    if (foto == null) return; // kullanıcı vazgeçti
-
-    // Çekilen fotoğraftaki karekodu çöz (kamera önizlemesi gerekmez)
-    final MobileScannerController okuyucu = MobileScannerController(
-      formats: const [BarcodeFormat.dataMatrix, BarcodeFormat.qrCode],
-    );
-    BarcodeCapture? sonuc;
-    try {
-      sonuc = await okuyucu.analyzeImage(foto.path);
-    } catch (e) {
-      _mesaj('Karekod okunamadı: $e');
-    } finally {
-      await okuyucu.dispose();
-    }
-
-    if (sonuc == null || sonuc.barcodes.isEmpty) {
-      _mesaj('Fotoğrafta karekod bulunamadı. '
-          'Daha yakın, net ve iyi ışıkta çekmeyi deneyin.');
-      return;
-    }
-
-    final ham = sonuc.barcodes.first.rawValue;
-    if (ham == null) {
-      _mesaj('Karekod okunamadı, tekrar deneyin.');
-      return;
-    }
-
+    if (ham == null) return;
     final ilac = karekoduParcala(ham);
     if (ilac == null) {
       _mesaj('Bu karekod bir ilaç karekodu gibi görünmüyor.');
@@ -257,7 +229,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
       appBar: AppBar(title: const Text('İlaç Dolabım')),
       body: _ilaclar.isEmpty
           ? const Center(
-              child: Text('Henüz ilaç yok.\nAlttaki butonla karekod fotoğrafı çek.',
+              child: Text('Henüz ilaç yok.\nAlttaki butonla karekod okut.',
                   textAlign: TextAlign.center))
           : ListView.builder(
               itemCount: _ilaclar.length,
@@ -286,7 +258,77 @@ class _AnaSayfaState extends State<AnaSayfa> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _tara,
         icon: const Icon(Icons.qr_code_scanner),
-        label: const Text('Karekod Çek'),
+        label: const Text('Karekod Oku'),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Canlı tarayıcı ekranı (mobile_scanner 7.x)
+// Kamera otomatik başlar. Karekod görülünce ekran kapanır ve sonucu döndürür.
+// Üstteki fotoğraf butonu: canlı kamera açılmazsa yedek okuma yolu.
+// ---------------------------------------------------------------------------
+class TarayiciSayfa extends StatefulWidget {
+  const TarayiciSayfa({super.key});
+  @override
+  State<TarayiciSayfa> createState() => _TarayiciSayfaState();
+}
+
+class _TarayiciSayfaState extends State<TarayiciSayfa> {
+  bool _okundu = false;
+
+  void _bitir(String ham) {
+    if (_okundu) return;
+    _okundu = true;
+    Navigator.pop(context, ham);
+  }
+
+  // Yedek yol: telefonun kamerasıyla fotoğraf çekip karekodu çöz
+  Future<void> _fotoyla() async {
+    final XFile? foto = await ImagePicker()
+        .pickImage(source: ImageSource.camera, imageQuality: 100);
+    if (foto == null) return;
+    final controller = MobileScannerController();
+    String? ham;
+    try {
+      final sonuc = await controller.analyzeImage(foto.path);
+      if (sonuc != null && sonuc.barcodes.isNotEmpty) {
+        ham = sonuc.barcodes.first.rawValue;
+      }
+    } catch (_) {
+      // sessizce geç, aşağıda mesaj verilecek
+    }
+    await controller.dispose();
+    if (!mounted) return;
+    if (ham != null) {
+      _bitir(ham);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Fotoğrafta karekod bulunamadı, tekrar deneyin.')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Karekodu kameraya gösterin'),
+        actions: [
+          IconButton(
+            tooltip: 'Kamera açılmazsa: fotoğraf çekerek oku',
+            icon: const Icon(Icons.photo_camera),
+            onPressed: _fotoyla,
+          ),
+        ],
+      ),
+      // Kontrolör vermiyoruz: widget kamerayı kendi başlatıp durduruyor.
+      body: MobileScanner(
+        onDetect: (capture) {
+          if (capture.barcodes.isEmpty) return;
+          final ham = capture.barcodes.first.rawValue;
+          if (ham != null) _bitir(ham);
+        },
       ),
     );
   }
