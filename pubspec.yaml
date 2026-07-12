@@ -9,7 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  mobile_scanner: 5.2.3       # karekod / DataMatrix okuma (sürüm sabit)
+  mobile_scanner: 7.2.0       # karekod / DataMatrix okuma (güncel sürüm)
   image_picker: 1.1.2         # telefonun kamerasıyla fotoğraf çekme
   shared_preferences: ^2.3.2  # ilaçları telefonda kalıcı saklama
 
