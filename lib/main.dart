@@ -1,21 +1,52 @@
-// İlaç Dolabı - Ev ilaç envanteri uygulaması
-// Karekod (GS1 DataMatrix) okuyup ilacı listeye ekler.
+// İlaç Dolabı - Ev ilaç envanteri
 //
-// Çalışan kısımlar:
-//   - Kamerayla DataMatrix okuma
-//   - Karekodu parçalama: GTIN, son kullanma tarihi, seri no, parti no
-//   - İlaçları telefonda kalıcı saklama (uygulamayı kapatınca silinmez)
-//
-// Senin tamamlaman gereken tek kısım (kodda "TODO" olarak işaretli):
-//   - GTIN -> ilaç adı eşleştirmesi (TİTCK barkod listesinden)
+// Özellikler:
+//   - Karekod (GS1 DataMatrix) okuyup ilacı listeye ekler
+//   - İlaç adı ve türü (Tablet/Krem/Şurup...) gömülü listeden bulunur
+//   - Türe göre gruplanmış liste
+//   - Son kullanma tarihine 7 gün kala ve son gün bildirim
+//   - Süresi geçenler ana listeden çıkar, "Atılacaklar" bölümüne düşer
 
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
 
-void main() => runApp(const IlacDolabiApp());
+final FlutterLocalNotificationsPlugin _bildirim =
+    FlutterLocalNotificationsPlugin();
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await ilacListesiniYukle();
+  await bildirimleriBaslat();
+  runApp(const IlacDolabiApp());
+}
+
+// ---------------------------------------------------------------------------
+// Bildirim altyapısı
+// ---------------------------------------------------------------------------
+Future<void> bildirimleriBaslat() async {
+  try {
+    tzdata.initializeTimeZones();
+    tz.setLocalLocation(tz.getLocation('Europe/Istanbul'));
+    await _bildirim.initialize(
+      settings: const InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      ),
+    );
+    final android = _bildirim.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    await android?.requestNotificationsPermission();
+    await android?.requestExactAlarmsPermission();
+  } catch (_) {
+    // Bildirim kurulamazsa uygulama yine çalışsın
+  }
+}
 
 class IlacDolabiApp extends StatelessWidget {
   const IlacDolabiApp({super.key});
@@ -24,24 +55,22 @@ class IlacDolabiApp extends StatelessWidget {
     return MaterialApp(
       title: 'İlaç Dolabı',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorSchemeSeed: Colors.teal,
-        useMaterial3: true,
-      ),
+      theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
       home: const AnaSayfa(),
     );
   }
 }
 
 // ---------------------------------------------------------------------------
-// Bir ilaç kaydını temsil eden model
+// Model
 // ---------------------------------------------------------------------------
 class Ilac {
   final String gtin;
   final String? seriNo;
   final String? partiNo;
   final DateTime? sonKullanma;
-  String ad;        // GTIN'den bulunacak
+  String ad;
+  String form; // Tablet / Krem / Şurup ...
 
   Ilac({
     required this.gtin,
@@ -49,6 +78,7 @@ class Ilac {
     this.partiNo,
     this.sonKullanma,
     this.ad = 'Bilinmiyor',
+    this.form = 'Diğer',
   });
 
   Map<String, dynamic> toJson() => {
@@ -57,6 +87,7 @@ class Ilac {
         'partiNo': partiNo,
         'sonKullanma': sonKullanma?.toIso8601String(),
         'ad': ad,
+        'form': form,
       };
 
   factory Ilac.fromJson(Map<String, dynamic> j) => Ilac(
@@ -67,85 +98,63 @@ class Ilac {
             ? DateTime.tryParse(j['sonKullanma'])
             : null,
         ad: j['ad'] ?? 'Bilinmiyor',
+        form: j['form'] ?? 'Diğer',
       );
 }
 
 // ---------------------------------------------------------------------------
-// GS1 DataMatrix karekodunu parçalayan fonksiyon
-//
-// Karekoddaki alanlar (Application Identifier - AI):
-//   01 -> GTIN, sabit 14 hane
-//   17 -> son kullanma tarihi, sabit 6 hane (YYAAGG)
-//   21 -> seri no, değişken uzunluk
-//   10 -> parti no, değişken uzunluk
-//
-// Değişken alanlar bir ayraç karakteriyle (FNC1 / GS, kod 29) biter.
+// Karekod çözümleme (GS1)
 // ---------------------------------------------------------------------------
 Ilac? karekoduParcala(String ham) {
-  // Bazı okuyucular başa fazladan karakter ekler, temizle
-  String s = ham.replaceAll('\u001d', '\u001d'); // GS karakterini koru
-  const gs = '\u001d'; // FNC1 ayraç
+  String s = ham;
+  const gs = '\u001d';
+  if (s.startsWith(']d2') || s.startsWith(']Q3')) s = s.substring(3);
 
   String? gtin, seri, parti;
   DateTime? skt;
-
   int i = 0;
-  // Eğer string ] ile başlıyorsa (sembol tanımlayıcı), atla
-  if (s.startsWith(']d2') || s.startsWith(']Q3')) s = s.substring(3);
 
   while (i < s.length - 1) {
     final ai = s.substring(i, i + 2);
     i += 2;
     switch (ai) {
-      case '01': // GTIN - 14 hane sabit
+      case '01':
         if (i + 14 <= s.length) {
           gtin = s.substring(i, i + 14);
           i += 14;
         }
         break;
-      case '17': // son kullanma - 6 hane sabit (YYAAGG)
+      case '17':
         if (i + 6 <= s.length) {
           skt = _tarihCevir(s.substring(i, i + 6));
           i += 6;
         }
         break;
-      case '21': // seri no - değişken
+      case '21':
         final son = _degiskenSonu(s, i, gs);
         seri = s.substring(i, son);
         i = son;
         break;
-      case '10': // parti no - değişken
+      case '10':
         final son = _degiskenSonu(s, i, gs);
         parti = s.substring(i, son);
         i = son;
         break;
       default:
-        // Bilinmeyen AI: bir sonraki ayraca atla, takılmamak için
-        final son = _degiskenSonu(s, i, gs);
-        i = son;
+        i = _degiskenSonu(s, i, gs);
     }
-    // Ayraç karakterini atla
     if (i < s.length && s[i] == gs) i++;
   }
 
-  // Yedek yöntem: Bazı kutularda ayraç (GS) karakteri hiç bulunmaz.
-  // O zaman yukarıdaki sıralı okuma şaşabilir. Burada kodun içinde
-  // doğrudan GTIN ve geçerli bir tarih arıyoruz.
+  // Ayraçsız kodlar için yedek yöntem
   if (gtin == null || skt == null) {
-    final duz = s.replaceAll(gs, ''); // ayraçları at
-
-    // GTIN: tercihen en baştaki "01" + 14 hane
+    final duz = s.replaceAll(gs, '');
     gtin ??= RegExp(r'^01(\d{14})').firstMatch(duz)?.group(1) ??
         RegExp(r'01(\d{14})').firstMatch(duz)?.group(1);
-
-    // Son kullanma: "17" + 6 hane olan ve MANTIKLI bir tarih veren ilk eşleşme
     if (skt == null) {
       for (final m in RegExp(r'17(\d{6})').allMatches(duz)) {
         final aday = _tarihCevir(m.group(1)!);
-        if (aday != null &&
-            aday.year >= 2000 &&
-            aday.year <= 2060 &&
-            aday.isAfter(DateTime(2015))) {
+        if (aday != null && aday.year >= 2015 && aday.year <= 2060) {
           skt = aday;
           break;
         }
@@ -153,7 +162,7 @@ Ilac? karekoduParcala(String ham) {
     }
   }
 
-  if (gtin == null) return null; // GTIN yoksa geçerli ilaç karekodu değil
+  if (gtin == null) return null;
   return Ilac(gtin: gtin, seriNo: seri, partiNo: parti, sonKullanma: skt);
 }
 
@@ -168,26 +177,74 @@ DateTime? _tarihCevir(String yyaagg) {
   final ay = int.tryParse(yyaagg.substring(2, 4));
   var gun = int.tryParse(yyaagg.substring(4, 6));
   if (yil == null || ay == null || gun == null) return null;
-  if (ay < 1 || ay > 12 || gun > 31) return null; // mantıksız tarih
+  if (ay < 1 || ay > 12 || gun > 31) return null;
   final tamYil = 2000 + yil;
-  // Gün 00 ise ayın son günü demektir
   if (gun == 0) gun = DateTime(tamYil, ay + 1, 0).day;
   return DateTime(tamYil, ay, gun);
 }
 
-// ---------------------------------------------------------------------------
-// TODO 1: GTIN'den ilaç adını bul
-// TİTCK'nın yayınladığı barkod listesini (CSV) uygulamaya assets olarak
-// ekleyip burada okuyabilirsin. Şimdilik küçük bir örnek tablo:
-// ---------------------------------------------------------------------------
-final Map<String, String> _ornekGtinAdTablosu = {
-  // 'GTIN': 'İLAÇ ADI',
-  '08699522705009': 'Örnek İlaç 500 mg',
-};
+String tarihYaz(DateTime d) =>
+    '${d.day.toString().padLeft(2, '0')}.${d.month.toString().padLeft(2, '0')}.${d.year}';
 
-String gtinDenAdBul(String gtin) {
-  return _ornekGtinAdTablosu[gtin] ?? 'Bilinmiyor (GTIN: $gtin)';
+// ---------------------------------------------------------------------------
+// İlaç adı + türü listesi (assets/ilaclar.csv -> "barkod<TAB>ad<TAB>tür")
+// ---------------------------------------------------------------------------
+final Map<String, String> _barkodAd = {};
+final Map<String, String> _barkodForm = {};
+
+Future<void> ilacListesiniYukle() async {
+  try {
+    final metin = await rootBundle.loadString('assets/ilaclar.csv');
+    for (final satir in const LineSplitter().convert(metin)) {
+      final p = satir.split('\t');
+      if (p.length >= 3) {
+        _barkodAd[p[0]] = p[1];
+        _barkodForm[p[0]] = p[2];
+      }
+    }
+  } catch (_) {}
 }
+
+String _barkodaCevir(String gtin) {
+  var b = gtin;
+  while (b.length > 13 && b.startsWith('0')) {
+    b = b.substring(1);
+  }
+  return b;
+}
+
+String gtinDenAdBul(String gtin) =>
+    _barkodAd[_barkodaCevir(gtin)] ?? 'Bilinmiyor (GTIN: $gtin)';
+
+String gtinDenFormBul(String gtin) =>
+    _barkodForm[_barkodaCevir(gtin)] ?? 'Diğer';
+
+// Grupların ekranda görünme sırası
+const List<String> formSirasi = [
+  'Tablet', 'Kapsül', 'Şurup', 'Süspansiyon', 'Damla', 'Krem', 'Merhem',
+  'Jel', 'Losyon/Şampuan', 'Sprey', 'İnhaler', 'Ampul/Enjeksiyon',
+  'Fitil/Ovül', 'Toz/Granül/Şase', 'Solüsyon', 'Bant/Flaster', 'Diğer',
+];
+
+const Map<String, IconData> formSimgesi = {
+  'Tablet': Icons.medication,
+  'Kapsül': Icons.medication_liquid,
+  'Şurup': Icons.local_drink,
+  'Süspansiyon': Icons.local_drink,
+  'Damla': Icons.water_drop,
+  'Krem': Icons.sanitizer,
+  'Merhem': Icons.sanitizer,
+  'Jel': Icons.sanitizer,
+  'Losyon/Şampuan': Icons.soap,
+  'Sprey': Icons.air,
+  'İnhaler': Icons.air,
+  'Ampul/Enjeksiyon': Icons.vaccines,
+  'Fitil/Ovül': Icons.healing,
+  'Toz/Granül/Şase': Icons.grain,
+  'Solüsyon': Icons.science,
+  'Bant/Flaster': Icons.medical_services,
+  'Diğer': Icons.inventory_2,
+};
 
 // ---------------------------------------------------------------------------
 // Ana ekran
@@ -211,11 +268,17 @@ class _AnaSayfaState extends State<AnaSayfa> {
     final prefs = await SharedPreferences.getInstance();
     final kayit = prefs.getString('ilaclar');
     if (kayit != null) {
-      final list = (jsonDecode(kayit) as List)
-          .map((e) => Ilac.fromJson(e))
-          .toList();
+      final list =
+          (jsonDecode(kayit) as List).map((e) => Ilac.fromJson(e)).toList();
+      // Eski kayıtların adı/türü eksikse tamamla
+      for (final il in list) {
+        if (il.ad.startsWith('Bilinmiyor')) il.ad = gtinDenAdBul(il.gtin);
+        if (il.form == 'Diğer') il.form = gtinDenFormBul(il.gtin);
+      }
       setState(() => _ilaclar = list);
+      _kaydet();
     }
+    _bildirimleriKur();
   }
 
   Future<void> _kaydet() async {
@@ -224,8 +287,48 @@ class _AnaSayfaState extends State<AnaSayfa> {
         'ilaclar', jsonEncode(_ilaclar.map((e) => e.toJson()).toList()));
   }
 
+  // Her değişiklikte tüm hatırlatmaları yeniden kurar
+  Future<void> _bildirimleriKur() async {
+    try {
+      await _bildirim.cancelAll();
+      const detay = NotificationDetails(
+        android: AndroidNotificationDetails(
+          'skt_kanali',
+          'Son kullanma hatırlatmaları',
+          channelDescription:
+              'İlaçların son kullanma tarihi yaklaşınca hatırlatır',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      );
+      final simdi = tz.TZDateTime.now(tz.local);
+      var id = 0;
+      for (final il in _ilaclar) {
+        final skt = il.sonKullanma;
+        if (skt == null) continue;
+        // 7 gün kala ve son gün, saat 10:00'da
+        for (final gunOnce in [7, 0]) {
+          final zaman = tz.TZDateTime(tz.local, skt.year, skt.month, skt.day, 10)
+              .subtract(Duration(days: gunOnce));
+          if (!zaman.isAfter(simdi)) continue;
+          await _bildirim.zonedSchedule(
+            id: id++,
+            title: gunOnce == 7
+                ? 'Son kullanma tarihi yaklaşıyor'
+                : 'Son kullanma tarihi bugün',
+            body: gunOnce == 7
+                ? '${il.ad} — 7 gün sonra (${tarihYaz(skt)}) süresi doluyor.'
+                : '${il.ad} — bugün son kullanma tarihi. Atmayı unutmayın.',
+            scheduledDate: zaman,
+            notificationDetails: detay,
+            androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+          );
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> _tara() async {
-    // Canlı tarayıcı ekranını aç; okunan karekodu (ham metin) geri alır.
     final ham = await Navigator.push<String>(
       context,
       MaterialPageRoute(builder: (_) => const TarayiciSayfa()),
@@ -237,18 +340,30 @@ class _AnaSayfaState extends State<AnaSayfa> {
       return;
     }
     ilac.ad = gtinDenAdBul(ilac.gtin);
+    ilac.form = gtinDenFormBul(ilac.gtin);
     setState(() => _ilaclar.add(ilac));
     _kaydet();
+    _bildirimleriKur();
   }
 
   void _mesaj(String m) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(m)));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
   }
 
-  // Çözümlenemeyen kodun içeriğini göster (teşhis için)
+  void _sil(Ilac il) {
+    setState(() => _ilaclar.remove(il));
+    _kaydet();
+    _bildirimleriKur();
+  }
+
+  void _gecmisleriSil(List<Ilac> gecmisler) {
+    setState(() => _ilaclar.removeWhere(gecmisler.contains));
+    _kaydet();
+    _bildirimleriKur();
+    _mesaj('${gecmisler.length} ilaç listeden silindi.');
+  }
+
   void _hamGoster(String ham) {
-    final gorunur = ham.replaceAll('\u001d', '|'); // ayracı görünür yap
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
@@ -260,67 +375,64 @@ class _AnaSayfaState extends State<AnaSayfa> {
             children: [
               const Text('Okunan içerik:'),
               const SizedBox(height: 8),
-              SelectableText(
-                gorunur,
-                style: const TextStyle(
-                    fontFamily: 'monospace', fontSize: 13),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'Bu bir ilaç karekodu değilse, kutunun KARE şeklindeki '
-                'karekodunu okuttuğunuzdan emin olun.',
-                style: TextStyle(fontSize: 12),
-              ),
+              SelectableText(ham.replaceAll('\u001d', '|'),
+                  style:
+                      const TextStyle(fontFamily: 'monospace', fontSize: 13)),
             ],
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Tamam'),
-          ),
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Tamam')),
         ],
       ),
     );
   }
 
-  void _sil(int i) {
-    setState(() => _ilaclar.removeAt(i));
-    _kaydet();
-  }
-
   @override
   Widget build(BuildContext context) {
+    final bugun = DateTime.now();
+    final bugunBas = DateTime(bugun.year, bugun.month, bugun.day);
+
+    // Süresi geçenleri ayır
+    final gecmisler = _ilaclar
+        .where((i) => i.sonKullanma != null && i.sonKullanma!.isBefore(bugunBas))
+        .toList();
+    final gecerliler =
+        _ilaclar.where((i) => !gecmisler.contains(i)).toList();
+
+    // Türe göre grupla
+    final gruplar = <String, List<Ilac>>{};
+    for (final il in gecerliler) {
+      gruplar.putIfAbsent(il.form, () => []).add(il);
+    }
+    for (final l in gruplar.values) {
+      l.sort((a, b) => (a.sonKullanma ?? DateTime(2100))
+          .compareTo(b.sonKullanma ?? DateTime(2100)));
+    }
+
+    final govde = <Widget>[];
+    for (final form in formSirasi) {
+      final liste = gruplar[form];
+      if (liste == null || liste.isEmpty) continue;
+      govde.add(_baslik(form, liste.length));
+      govde.addAll(liste.map((il) => _kart(il, bugunBas)));
+    }
+    if (gecmisler.isNotEmpty) {
+      govde.add(_gecmisBaslik(gecmisler));
+      govde.addAll(gecmisler.map((il) => _kart(il, bugunBas, gecmis: true)));
+    }
+
     return Scaffold(
-      appBar: AppBar(title: const Text('İlaç Dolabım')),
+      appBar: AppBar(
+        title: Text('İlaç Dolabım (${_ilaclar.length})'),
+      ),
       body: _ilaclar.isEmpty
           ? const Center(
               child: Text('Henüz ilaç yok.\nAlttaki butonla karekod okut.',
                   textAlign: TextAlign.center))
-          : ListView.builder(
-              itemCount: _ilaclar.length,
-              itemBuilder: (_, i) {
-                final il = _ilaclar[i];
-                final skt = il.sonKullanma;
-                final gecmis =
-                    skt != null && skt.isBefore(DateTime.now());
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
-                  child: ListTile(
-                    title: Text(il.ad),
-                    subtitle: Text(skt != null
-                        ? 'Son kullanma: ${skt.day}.${skt.month}.${skt.year}'
-                            '${gecmis ? '  ⚠️ GEÇMİŞ' : ''}'
-                        : 'Son kullanma: okunamadı'),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () => _sil(i),
-                    ),
-                  ),
-                );
-              },
-            ),
+          : ListView(padding: const EdgeInsets.only(bottom: 88), children: govde),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _tara,
         icon: const Icon(Icons.qr_code_scanner),
@@ -328,12 +440,74 @@ class _AnaSayfaState extends State<AnaSayfa> {
       ),
     );
   }
+
+  Widget _baslik(String form, int adet) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 18, 16, 6),
+        child: Row(children: [
+          Icon(formSimgesi[form] ?? Icons.inventory_2,
+              size: 20, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 8),
+          Text('$form  ($adet)',
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: Theme.of(context).colorScheme.primary)),
+        ]),
+      );
+
+  Widget _gecmisBaslik(List<Ilac> gecmisler) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 24, 8, 6),
+        child: Row(children: [
+          const Icon(Icons.delete_forever, size: 20, color: Colors.red),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text('Süresi Geçmiş — Atılacak (${gecmisler.length})',
+                style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: Colors.red)),
+          ),
+          TextButton(
+            onPressed: () => _gecmisleriSil(gecmisler),
+            child: const Text('Hepsini sil'),
+          ),
+        ]),
+      );
+
+  Widget _kart(Ilac il, DateTime bugunBas, {bool gecmis = false}) {
+    final skt = il.sonKullanma;
+    String alt;
+    Color? renk;
+    if (skt == null) {
+      alt = 'Son kullanma: okunamadı';
+    } else {
+      final kalan = skt.difference(bugunBas).inDays;
+      alt = 'Son kullanma: ${tarihYaz(skt)}';
+      if (gecmis) {
+        alt += '  •  süresi doldu';
+        renk = Colors.red;
+      } else if (kalan <= 7) {
+        alt += '  •  $kalan gün kaldı';
+        renk = Colors.orange.shade800;
+      }
+    }
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      color: gecmis ? Colors.red.withValues(alpha: 0.06) : null,
+      child: ListTile(
+        title: Text(il.ad),
+        subtitle: Text(alt, style: TextStyle(color: renk)),
+        trailing: IconButton(
+          icon: const Icon(Icons.delete_outline),
+          onPressed: () => _sil(il),
+        ),
+      ),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Canlı tarayıcı ekranı (mobile_scanner 7.x)
-// Kamera otomatik başlar. Karekod görülünce ekran kapanır ve sonucu döndürür.
-// Üstteki fotoğraf butonu: canlı kamera açılmazsa yedek okuma yolu.
+// Canlı tarayıcı ekranı
 // ---------------------------------------------------------------------------
 class TarayiciSayfa extends StatefulWidget {
   const TarayiciSayfa({super.key});
@@ -351,7 +525,6 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
     Navigator.pop(context, ham);
   }
 
-  // Yedek yol: telefonun kamerasıyla fotoğraf çekip karekodu çöz
   Future<void> _fotoyla() async {
     final XFile? foto = await ImagePicker()
         .pickImage(source: ImageSource.camera, imageQuality: 100);
@@ -363,9 +536,7 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
       if (sonuc != null && sonuc.barcodes.isNotEmpty) {
         ham = sonuc.barcodes.first.rawValue;
       }
-    } catch (_) {
-      // sessizce geç, aşağıda mesaj verilecek
-    }
+    } catch (_) {}
     await controller.dispose();
     if (!mounted) return;
     if (ham != null) {
@@ -389,14 +560,11 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
           ),
         ],
       ),
-      // Kontrolör vermiyoruz: widget kamerayı kendi başlatıp durduruyor.
       body: Stack(
         children: [
           MobileScanner(
             onDetect: (capture) {
               if (_okundu) return;
-              // Kutunun DÜZ ÇİZGİLİ barkodunu (EAN-13 vb.) yoksay;
-              // tarih bilgisi sadece KARE karekodun içinde var.
               for (final b in capture.barcodes) {
                 final kare = b.format == BarcodeFormat.dataMatrix ||
                     b.format == BarcodeFormat.qrCode;
@@ -405,7 +573,6 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
                   return;
                 }
               }
-              // Kare karekod görülmediyse taramaya devam et (uyarı göster)
               if (!_uyardi) {
                 _uyardi = true;
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -415,7 +582,6 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
               }
             },
           ),
-          // Nişangah: karekodu bu çerçeveye getir
           IgnorePointer(
             child: Center(
               child: Container(
@@ -433,4 +599,3 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
     );
   }
 }
-
