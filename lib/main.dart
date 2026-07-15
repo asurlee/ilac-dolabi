@@ -339,6 +339,15 @@ class _AnaSayfaState extends State<AnaSayfa> {
       _hamGoster(ham);
       return;
     }
+    // Aynı KUTU daha önce okutulmuş mu? (seri no her kutuda benzersizdir)
+    if (ilac.seriNo != null && ilac.seriNo!.isNotEmpty) {
+      final ayni = _ilaclar.any(
+          (e) => e.gtin == ilac.gtin && e.seriNo == ilac.seriNo);
+      if (ayni) {
+        _mesaj('Bu kutu zaten listede, tekrar eklenmedi.');
+        return;
+      }
+    }
     ilac.ad = gtinDenAdBul(ilac.gtin);
     ilac.form = gtinDenFormBul(ilac.gtin);
     setState(() => _ilaclar.add(ilac));
@@ -348,6 +357,72 @@ class _AnaSayfaState extends State<AnaSayfa> {
 
   void _mesaj(String m) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+  }
+
+  // İsim/tür elle düzeltme: listede olmayan ilaçlar için
+  Future<void> _duzenle(Ilac il) async {
+    final adKutusu = TextEditingController(
+        text: il.ad.startsWith('Bilinmiyor') ? '' : il.ad);
+    String secilenForm = il.form;
+    final kaydet = await showDialog<bool>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (context, yenile) => AlertDialog(
+          title: const Text('İlacı düzenle'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: adKutusu,
+                autofocus: true,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(
+                  labelText: 'İlaç adı',
+                  hintText: 'Örn: FLAGYL 500 MG 20 FILM TABLET',
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  const Text('Türü:'),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: DropdownButton<String>(
+                      isExpanded: true,
+                      value: secilenForm,
+                      items: formSirasi
+                          .map((f) =>
+                              DropdownMenuItem(value: f, child: Text(f)))
+                          .toList(),
+                      onChanged: (v) =>
+                          yenile(() => secilenForm = v ?? 'Diğer'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text('GTIN: ${il.gtin}',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey)),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Vazgeç')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Kaydet')),
+          ],
+        ),
+      ),
+    );
+    if (kaydet != true) return;
+    final ad = adKutusu.text.trim();
+    setState(() {
+      if (ad.isNotEmpty) il.ad = ad;
+      il.form = secilenForm;
+    });
+    _kaydet();
   }
 
   void _sil(Ilac il) {
@@ -495,6 +570,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       color: gecmis ? Colors.red.withValues(alpha: 0.06) : null,
       child: ListTile(
+        onTap: () => _duzenle(il),
         title: Text(il.ad),
         subtitle: Text(alt, style: TextStyle(color: renk)),
         trailing: IconButton(
@@ -518,6 +594,28 @@ class TarayiciSayfa extends StatefulWidget {
 class _TarayiciSayfaState extends State<TarayiciSayfa> {
   bool _okundu = false;
   bool _uyardi = false;
+  bool _ters = false;   // siyah zemin üzerine BEYAZ karekod için
+  bool _fener = false;
+  MobileScannerController _kontrol = MobileScannerController();
+
+  @override
+  void initState() {
+    super.initState();
+    _baslat(_kontrol);
+  }
+
+  // Widget kamerayı kendi başlatıyorsa buradaki hata yutulur, sorun olmaz.
+  Future<void> _baslat(MobileScannerController k) async {
+    try {
+      await k.start();
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _kontrol.dispose();
+    super.dispose();
+  }
 
   void _bitir(String ham) {
     if (_okundu) return;
@@ -525,11 +623,41 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
     Navigator.pop(context, ham);
   }
 
+  // Ters renk modu: bazı kutularda karekod siyah zemine beyaz basılır.
+  // Normal okuyucular bunu göremez; görüntüyü ters çevirince okunur.
+  Future<void> _tersDegistir() async {
+    final eski = _kontrol;
+    final yeniTers = !_ters;
+    final yeni = MobileScannerController(invertImage: yeniTers);
+    setState(() {
+      _ters = yeniTers;
+      _kontrol = yeni;
+      _fener = false;
+    });
+    await eski.dispose();
+    await _baslat(yeni);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      duration: const Duration(seconds: 2),
+      content: Text(yeniTers
+          ? 'Ters renk AÇIK — siyah zemine beyaz karekodlar için'
+          : 'Ters renk kapalı — normal karekodlar için'),
+    ));
+  }
+
+  Future<void> _fenerDegistir() async {
+    try {
+      await _kontrol.toggleTorch();
+      setState(() => _fener = !_fener);
+    } catch (_) {}
+  }
+
   Future<void> _fotoyla() async {
     final XFile? foto = await ImagePicker()
         .pickImage(source: ImageSource.camera, imageQuality: 100);
     if (foto == null) return;
-    final controller = MobileScannerController();
+    // Fotoğrafta da aynı ters renk ayarını kullan
+    final controller = MobileScannerController(invertImage: _ters);
     String? ham;
     try {
       final sonuc = await controller.analyzeImage(foto.path);
@@ -551,10 +679,21 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Karekodu kameraya gösterin'),
+        title: Text(_ters ? 'Ters renk modu' : 'Karekodu okutun'),
         actions: [
           IconButton(
-            tooltip: 'Kamera açılmazsa: fotoğraf çekerek oku',
+            tooltip: 'Ters renk (siyah zemine beyaz karekod)',
+            icon: Icon(Icons.invert_colors,
+                color: _ters ? Colors.amber : null),
+            onPressed: _tersDegistir,
+          ),
+          IconButton(
+            tooltip: 'Fener',
+            icon: Icon(_fener ? Icons.flash_on : Icons.flash_off),
+            onPressed: _fenerDegistir,
+          ),
+          IconButton(
+            tooltip: 'Fotoğraf çekerek oku',
             icon: const Icon(Icons.photo_camera),
             onPressed: _fotoyla,
           ),
@@ -563,6 +702,8 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
       body: Stack(
         children: [
           MobileScanner(
+            key: ValueKey(_ters),
+            controller: _kontrol,
             onDetect: (capture) {
               if (_okundu) return;
               for (final b in capture.barcodes) {
@@ -588,9 +729,29 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
                 width: 220,
                 height: 220,
                 decoration: BoxDecoration(
-                  border: Border.all(color: Colors.tealAccent, width: 3),
+                  border: Border.all(
+                      color: _ters ? Colors.amber : Colors.tealAccent,
+                      width: 3),
                   borderRadius: BorderRadius.circular(12),
                 ),
+              ),
+            ),
+          ),
+          // Alt bilgi çubuğu
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Container(
+              color: Colors.black.withValues(alpha: 0.6),
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                _ters
+                    ? 'Ters renk açık. Normale dönmek için üstteki damla simgesine bas.'
+                    : 'Okumuyorsa: karekod SİYAH zemine BEYAZ basılmış olabilir.\n'
+                        'Üstteki damla simgesine basıp tekrar dene.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
               ),
             ),
           ),
