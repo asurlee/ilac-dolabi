@@ -128,6 +128,31 @@ Ilac? karekoduParcala(String ham) {
     if (i < s.length && s[i] == gs) i++;
   }
 
+  // Yedek yöntem: Bazı kutularda ayraç (GS) karakteri hiç bulunmaz.
+  // O zaman yukarıdaki sıralı okuma şaşabilir. Burada kodun içinde
+  // doğrudan GTIN ve geçerli bir tarih arıyoruz.
+  if (gtin == null || skt == null) {
+    final duz = s.replaceAll(gs, ''); // ayraçları at
+
+    // GTIN: tercihen en baştaki "01" + 14 hane
+    gtin ??= RegExp(r'^01(\d{14})').firstMatch(duz)?.group(1) ??
+        RegExp(r'01(\d{14})').firstMatch(duz)?.group(1);
+
+    // Son kullanma: "17" + 6 hane olan ve MANTIKLI bir tarih veren ilk eşleşme
+    if (skt == null) {
+      for (final m in RegExp(r'17(\d{6})').allMatches(duz)) {
+        final aday = _tarihCevir(m.group(1)!);
+        if (aday != null &&
+            aday.year >= 2000 &&
+            aday.year <= 2060 &&
+            aday.isAfter(DateTime(2015))) {
+          skt = aday;
+          break;
+        }
+      }
+    }
+  }
+
   if (gtin == null) return null; // GTIN yoksa geçerli ilaç karekodu değil
   return Ilac(gtin: gtin, seriNo: seri, partiNo: parti, sonKullanma: skt);
 }
@@ -139,12 +164,15 @@ int _degiskenSonu(String s, int basla, String gs) {
 
 DateTime? _tarihCevir(String yyaagg) {
   if (yyaagg.length != 6) return null;
-  final yil = 2000 + int.parse(yyaagg.substring(0, 2));
-  final ay = int.parse(yyaagg.substring(2, 4));
-  var gun = int.parse(yyaagg.substring(4, 6));
+  final yil = int.tryParse(yyaagg.substring(0, 2));
+  final ay = int.tryParse(yyaagg.substring(2, 4));
+  var gun = int.tryParse(yyaagg.substring(4, 6));
+  if (yil == null || ay == null || gun == null) return null;
+  if (ay < 1 || ay > 12 || gun > 31) return null; // mantıksız tarih
+  final tamYil = 2000 + yil;
   // Gün 00 ise ayın son günü demektir
-  if (gun == 0) gun = DateTime(yil, ay + 1, 0).day;
-  return DateTime(yil, ay, gun);
+  if (gun == 0) gun = DateTime(tamYil, ay + 1, 0).day;
+  return DateTime(tamYil, ay, gun);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +233,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
     if (ham == null) return;
     final ilac = karekoduParcala(ham);
     if (ilac == null) {
-      _mesaj('Bu karekod bir ilaç karekodu gibi görünmüyor.');
+      _hamGoster(ham);
       return;
     }
     ilac.ad = gtinDenAdBul(ilac.gtin);
@@ -216,6 +244,44 @@ class _AnaSayfaState extends State<AnaSayfa> {
   void _mesaj(String m) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(m)));
+  }
+
+  // Çözümlenemeyen kodun içeriğini göster (teşhis için)
+  void _hamGoster(String ham) {
+    final gorunur = ham.replaceAll('\u001d', '|'); // ayracı görünür yap
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Karekod çözümlenemedi'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Okunan içerik:'),
+              const SizedBox(height: 8),
+              SelectableText(
+                gorunur,
+                style: const TextStyle(
+                    fontFamily: 'monospace', fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Bu bir ilaç karekodu değilse, kutunun KARE şeklindeki '
+                'karekodunu okuttuğunuzdan emin olun.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Tamam'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _sil(int i) {
@@ -277,6 +343,7 @@ class TarayiciSayfa extends StatefulWidget {
 
 class _TarayiciSayfaState extends State<TarayiciSayfa> {
   bool _okundu = false;
+  bool _uyardi = false;
 
   void _bitir(String ham) {
     if (_okundu) return;
@@ -323,12 +390,45 @@ class _TarayiciSayfaState extends State<TarayiciSayfa> {
         ],
       ),
       // Kontrolör vermiyoruz: widget kamerayı kendi başlatıp durduruyor.
-      body: MobileScanner(
-        onDetect: (capture) {
-          if (capture.barcodes.isEmpty) return;
-          final ham = capture.barcodes.first.rawValue;
-          if (ham != null) _bitir(ham);
-        },
+      body: Stack(
+        children: [
+          MobileScanner(
+            onDetect: (capture) {
+              if (_okundu) return;
+              // Kutunun DÜZ ÇİZGİLİ barkodunu (EAN-13 vb.) yoksay;
+              // tarih bilgisi sadece KARE karekodun içinde var.
+              for (final b in capture.barcodes) {
+                final kare = b.format == BarcodeFormat.dataMatrix ||
+                    b.format == BarcodeFormat.qrCode;
+                if (kare && b.rawValue != null) {
+                  _bitir(b.rawValue!);
+                  return;
+                }
+              }
+              // Kare karekod görülmediyse taramaya devam et (uyarı göster)
+              if (!_uyardi) {
+                _uyardi = true;
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  duration: Duration(seconds: 4),
+                  content: Text('Çizgili barkod değil, KARE karekodu okutun.'),
+                ));
+              }
+            },
+          ),
+          // Nişangah: karekodu bu çerçeveye getir
+          IgnorePointer(
+            child: Center(
+              child: Container(
+                width: 220,
+                height: 220,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.tealAccent, width: 3),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
