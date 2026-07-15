@@ -1,8 +1,5 @@
 name: APK Derle
 
-# Ne zaman çalışır:
-#  - main dalına her dosya yüklendiğinde
-#  - ya da Actions sekmesinden elle ("Run workflow")
 on:
   push:
     branches: [ main ]
@@ -39,25 +36,13 @@ jobs:
           cp /tmp/main.dart lib/main.dart
           cp /tmp/pubspec.yaml pubspec.yaml
 
-      - name: Kamera iznini ekle
-        run: |
-          M=android/app/src/main/AndroidManifest.xml
-          grep -q "android.permission.CAMERA" "$M" || \
-          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA"/>\n    <application#' "$M"
-
-      - name: minSdk 23 yap (mobile_scanner 7.x bunu gerektiriyor)
-        run: |
-          for f in android/app/build.gradle android/app/build.gradle.kts; do
-            if [ -f "$f" ]; then
-              sed -i 's/flutter.minSdkVersion/23/g' "$f"
-              echo "minSdk ayarlandı: $f"
-            fi
-          done
+      - name: Android ayarlarını yap (izinler, bildirim, desugaring)
+        run: python3 .github/ayarla.py
 
       - name: Paketleri indir
         run: flutter pub get
 
-      - name: APK derle (budama yapılmadan - kamera sorunlarını önler)
+      - name: APK derle
         run: flutter build apk --debug
 
       - name: APK'yı çıktı olarak yükle
