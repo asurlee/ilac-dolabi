@@ -334,19 +334,43 @@ class _AnaSayfaState extends State<AnaSayfa> {
       MaterialPageRoute(builder: (_) => const TarayiciSayfa()),
     );
     if (ham == null) return;
+    if (!mounted) return; // tarama ekranı kapandıysa devam etme
     final ilac = karekoduParcala(ham);
     if (ilac == null) {
       _hamGoster(ham);
       return;
     }
-    // Aynı KUTU daha önce okutulmuş mu? (seri no her kutuda benzersizdir)
+    // 1) Tıpatıp aynı KUTU mu? (seri no her kutuda benzersizdir)
     if (ilac.seriNo != null && ilac.seriNo!.isNotEmpty) {
-      final ayni = _ilaclar.any(
-          (e) => e.gtin == ilac.gtin && e.seriNo == ilac.seriNo);
-      if (ayni) {
+      final ayniKutu = _ilaclar
+          .any((e) => e.gtin == ilac.gtin && e.seriNo == ilac.seriNo);
+      if (ayniKutu) {
         _mesaj('Bu kutu zaten listede, tekrar eklenmedi.');
         return;
       }
+    }
+    // 2) Aynı ilaçtan zaten var mı? Ayrı kutu olabilir -> kullanıcıya sor
+    final mevcut = _ilaclar.where((e) => e.gtin == ilac.gtin).length;
+    if (mevcut > 0) {
+      final ad = gtinDenAdBul(ilac.gtin);
+      final ekle = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Bu ilaç zaten listede'),
+          content: Text('$ad\n\nListede $mevcut kutu kayıtlı. '
+              'Bu ayrı bir kutu mu, yoksa aynı kutuyu mu okuttunuz?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Aynı kutu, ekleme')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Ayrı kutu, ekle')),
+          ],
+        ),
+      );
+      if (ekle != true) return;
+      if (!mounted) return;
     }
     ilac.ad = gtinDenAdBul(ilac.gtin);
     ilac.form = gtinDenFormBul(ilac.gtin);
